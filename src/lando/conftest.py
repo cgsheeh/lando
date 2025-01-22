@@ -95,3 +95,9 @@ def user(user_plaintext_password, conduit_permissions):
     user.profile.save()
 
     return user
+
+
+@pytest.fixture
+def headless_user(user):
+    user.profile.save_lando_api_key("api-dummy-key")
+    return user
