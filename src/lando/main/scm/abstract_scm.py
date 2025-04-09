@@ -216,3 +216,12 @@ class AbstractSCM:
 
         This is useful when parsing semi-structured multiline text output."""
         return "".join(random.choices(string.ascii_uppercase, k=16))
+
+    @abstractmethod
+    def merge_onto(
+        self, commit_message: str, target: str, strategy: Optional[str]
+    ) -> str:
+        """Create a merge commit on the specified repo.
+
+        Return the SHA of the newly created merge commit.
+        """

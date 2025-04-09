@@ -417,3 +417,64 @@ def _create_hg_commit(request: pytest.FixtureRequest, clone_path: Path):
     )
 
     return new_file
+
+
+@pytest.mark.parametrize("strategy", [None, "ours", "theirs"])
+def test_HgSCM_merge_onto(
+    hg_clone,
+    request: pytest.FixtureRequest,
+    strategy: str | None,
+):
+    scm = HgSCM(str(hg_clone))
+
+    with scm.for_push(f"pytest+{request.node.name}@lando"):
+        start_commit = scm.head_ref()
+
+        # Create a few commits.
+        _create_hg_commit(request, Path(hg_clone))
+        _create_hg_commit(request, Path(hg_clone))
+        _create_hg_commit(request, Path(hg_clone))
+        main_commit = scm.head_ref()
+
+        # Update to feature commit and merge main into it
+        subprocess.run(
+            ["hg", "update", "--clean", "-r", start_commit],
+            cwd=str(hg_clone),
+            check=True,
+        )
+
+        # Create a few different commits.
+        _create_hg_commit(request, Path(hg_clone))
+        _create_hg_commit(request, Path(hg_clone))
+        _create_hg_commit(request, Path(hg_clone))
+        merge_commit = scm.head_ref()
+
+        # Update to feature commit and merge main into it
+        subprocess.run(
+            ["hg", "update", "--clean", "-r", main_commit],
+            cwd=str(hg_clone),
+            check=True,
+        )
+
+        merge_msg = f"Merge main into feature with strategy {strategy}"
+        new_merge_commit = scm.merge_onto(merge_msg, merge_commit, strategy)
+
+        # Check that the merge commit has two parents
+        parents = (
+            subprocess.run(
+                ["hg", "log", "-r", new_merge_commit, "-T", "{p1node} {p2node}"],
+                cwd=str(hg_clone),
+                capture_output=True,
+                check=True,
+            )
+            .stdout.decode()
+            .strip()
+            .split()
+        )
+
+        assert (
+            len(parents) == 2
+        ), f"Expected merge commit with 2 parents, got: {parents}"
+        assert (
+            main_commit in parents and merge_commit in parents
+        ), "Unexpected merge parents"

@@ -1,7 +1,8 @@
 import datetime
+import enum
 import logging
 from io import StringIO
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, Optional, Union
 
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse
@@ -220,18 +221,44 @@ class CreateCommitAction(Schema):
         return True
 
 
+@enum.unique
+class MergeStrategy(str, enum.Enum):
+    """Enumeration of acceptable non-default merge strategies.
+
+    This class is a subclass of `str` to enable serialization in Pydantic.
+    """
+
+    Ours = "ours"
+    Theirs = "theirs"
+
+
 class MergeOntoAction(Schema):
     """Merge the current branch into the target commit."""
 
     action: Literal["merge-onto"]
+    commit_message: str
+    strategy: Optional[MergeStrategy]
     target: str
-    message: str
 
     def process(
         self, job: AutomationJob, repo: Repo, scm: AbstractSCM, index: int
     ) -> bool:
         """Perform a merge on the repo."""
-        raise NotImplementedError()
+        try:
+            scm.merge_onto(
+                commit_message=self.commit_message,
+                target=self.target,
+                strategy=self.strategy,
+            )
+        except Exception as exc:
+            message = (
+                f"Aborting, could not perform `merge-onto`, action #{index}.\n{exc}"
+            )
+            raise AutomationActionException(
+                message=message, job_action=JobAction.FAIL, is_fatal=True
+            )
+
+        return True
 
 
 class TagAction(Schema):
