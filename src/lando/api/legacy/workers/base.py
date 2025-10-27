@@ -86,9 +86,7 @@ class Worker(ABC):
     ):
         self.worker_instance = worker_instance
 
-        self.treestatus_client = lando.utils.treestatus.get_treestatus_client()
-        if not self.treestatus_client.ping():
-            raise ConnectionError("Could not connect to Treestatus")
+        self.setup_treestatus_client()
 
         self.refresh_active_repos()
 
@@ -101,6 +99,12 @@ class Worker(ABC):
                 logger.warning(
                     f"No {self.SSH_PRIVATE_KEY_ENV_KEY} present in environment."
                 )
+
+    def setup_treestatus_client(self):
+        """Setup Treestatus for this worker."""
+        self.treestatus_client = lando.utils.treestatus.get_treestatus_client()
+        if not self.treestatus_client.ping():
+            raise ConnectionError("Could not connect to Treestatus")
 
     @staticmethod
     def _setup_ssh(ssh_private_key: str):

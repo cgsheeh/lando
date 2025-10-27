@@ -41,6 +41,11 @@ class UpliftWorker(Worker):
         self.active_repos = self.enabled_repos
 
     @override
+    def setup_treestatus_client(self):
+        """Skip setting up the Treestatus client for this worker."""
+        pass
+
+    @override
     def run_job(self, job: UpliftJob) -> bool:
         """Run an uplift job."""
         repo = job.target_repo
