@@ -867,9 +867,9 @@ def hg_server(hg_test_bundle: pathlib.Path, tmpdir: os.PathLike, worker_id: str)
     for _i in range(10):
         try:
             requests.get(hg_url)
+            break
         except Exception:
             time.sleep(1)
-        break
 
     yield hg_url
     serve.kill()
