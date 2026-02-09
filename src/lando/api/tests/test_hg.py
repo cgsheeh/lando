@@ -198,10 +198,10 @@ def test_integrated_hgrepo_patch_conflict_failure(hg_clone):
         "./.hg/hgrc",
         "./testdir/../.hg/hgrc",
         "./././.hg/hgrc",
-    )
+    ),
 )
 def test_integrated_hgrepo_patch_hg_changes_failure(
-        hg_clone: os.PathLike, reference: str
+    hg_clone: os.PathLike, reference: str
 ):
     # Patches with changes in .hg should raise a ValueError exception.
     # .hg/hgrc should also not be modified.
