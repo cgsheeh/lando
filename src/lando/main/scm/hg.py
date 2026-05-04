@@ -35,6 +35,7 @@ from lando.main.scm.exceptions import (
     TreeClosed,
 )
 from lando.main.scm.helpers import GitPatchHelper, HgPatchHelper, PatchHelper
+from lando.utils.strings import truncate_output
 
 logger = logging.getLogger(__name__)
 
@@ -697,7 +698,8 @@ class HgSCM(AbstractSCM):
         out = out.getvalue()
         err = err.getvalue()
         if out:
-            out_string = (out.rstrip().decode(self.ENCODING, errors="replace"),)
+            decoded_output = out.rstrip().decode(self.ENCODING, errors="replace")
+            out_string = truncate_output(decoded_output)
             logger.info(
                 "output from hg command #%s: %s",
                 correlation_id,

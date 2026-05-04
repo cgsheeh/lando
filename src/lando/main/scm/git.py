@@ -24,6 +24,7 @@ from lando.main.scm.helpers import GitPatchHelper, PatchHelper
 from lando.settings import LANDO_USER_EMAIL, LANDO_USER_NAME
 from lando.utils.const import URL_USERINFO_RE
 from lando.utils.github import GitHub
+from lando.utils.strings import truncate_output
 
 from .abstract_scm import AbstractSCM
 
@@ -620,13 +621,14 @@ class GitSCM(AbstractSCM):
             )
 
         if out:
+            truncated_output = truncate_output(out)
             logger.info(
                 "output from git command #%s: %s",
                 correlation_id,
-                out,
+                truncated_output,
                 extra={
                     "command_id": correlation_id,
-                    "output": out,
+                    "output": truncated_output,
                     "path": cwd,
                 },
             )
