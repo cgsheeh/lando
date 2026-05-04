@@ -24,7 +24,7 @@ from lando.main.scm.helpers import GitPatchHelper, PatchHelper
 from lando.settings import LANDO_USER_EMAIL, LANDO_USER_NAME
 from lando.utils.const import URL_USERINFO_RE
 from lando.utils.github import GitHub
-from lando.utils.strings import truncate_output
+from lando.utils.strings import truncate_text
 
 from .abstract_scm import AbstractSCM
 
@@ -231,7 +231,12 @@ class GitSCM(AbstractSCM):
 
             self._git_run("add", "-A", "-f", cwd=self.path)
             return self._git_run(
-                "diff", "--staged", "--binary", cwd=self.path, rstrip=False
+                "diff",
+                "--staged",
+                "--binary",
+                cwd=self.path,
+                rstrip=False,
+                truncate_output=True,
             )
 
     @override
@@ -249,6 +254,7 @@ class GitSCM(AbstractSCM):
             "-1",
             revision_id,
             cwd=self.path,
+            truncate_output=True,
         )
         # We only return the patch if the `From` header indicates that it's the same as
         # the requested revision. This may not be the case when, e.g., `git
@@ -568,7 +574,13 @@ class GitSCM(AbstractSCM):
         return True
 
     @classmethod
-    def _git_run(cls, *args, cwd: str | None = None, rstrip: bool = True) -> str:
+    def _git_run(
+        cls,
+        *args,
+        cwd: str | None = None,
+        rstrip: bool = True,
+        truncate_output: bool = False,
+    ) -> str:
         """Run a git command and return full output.
 
         Parameters:
@@ -578,6 +590,12 @@ class GitSCM(AbstractSCM):
 
         cwd: str
             Optional path to work in, default to '/'
+
+        truncate_output: bool
+            If `True`, only the head and tail of the command's output will be
+            logged. Use this for commands like `git format-patch` whose full
+            output is too large to be useful in logs. The return value is
+            unaffected.
 
         Returns:
             str: the standard output of the command
@@ -621,14 +639,14 @@ class GitSCM(AbstractSCM):
             )
 
         if out:
-            truncated_output = truncate_output(out)
+            log_output = truncate_text(out) if truncate_output else out
             logger.info(
                 "output from git command #%s: %s",
                 correlation_id,
-                truncated_output,
+                log_output,
                 extra={
                     "command_id": correlation_id,
-                    "output": truncated_output,
+                    "output": log_output,
                     "path": cwd,
                 },
             )
