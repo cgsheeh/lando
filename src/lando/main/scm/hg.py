@@ -360,7 +360,9 @@ class HgSCM(AbstractSCM):
     @override
     def get_patch(self, revision_id: str) -> str | None:
         """Return a complete patch for the given revision, in the git extended diff format."""
-        out = self.run_hg(["export", "--git", "-r", revision_id], truncate_output=True)
+        out = self.run_hg(
+            ["export", "--git", "-r", revision_id], truncate_log_output=True
+        )
         try:
             return out.decode("utf-8")
         except UnicodeDecodeError:
@@ -658,20 +660,21 @@ class HgSCM(AbstractSCM):
             last_result = self.run_hg(cmd)
         return last_result
 
-    def run_hg(self, args: list[str], *, truncate_output: bool = False) -> bytes:
+    def run_hg(self, args: list[str], *, truncate_log_output: bool = False) -> bytes:
         """Run a single Mercurial command, and return its output.
 
-        If `truncate_output` is `True`, only the head and tail of the command's
+        If `truncate_log_output` is `True`, only the head and tail of the command's
         output will be logged. Use this for commands like `hg export` whose
-        full output is too large to be useful in logs.
+        full output is too large to be useful in logs. The return value is
+        unaffected.
 
         A specific HgException will be raised on error."""
         try:
-            return self._run_hg(args, truncate_output=truncate_output)
+            return self._run_hg(args, truncate_log_output=truncate_log_output)
         except hglib.error.CommandError as exc:
             raise HgException.from_hglib_error(exc) from exc
 
-    def _run_hg(self, args: list[str], *, truncate_output: bool = False) -> bytes:
+    def _run_hg(self, args: list[str], *, truncate_log_output: bool = False) -> bytes:
         """Use hglib to run a Mercurial command, and return its output."""
         correlation_id = str(uuid.uuid4())
         command_string = " ".join(["hg"] + [shlex.quote(str(arg)) for arg in args])
@@ -704,7 +707,7 @@ class HgSCM(AbstractSCM):
         if out:
             decoded_output = out.rstrip().decode(self.ENCODING, errors="replace")
             out_string = (
-                truncate_text(decoded_output) if truncate_output else decoded_output
+                truncate_text(decoded_output) if truncate_log_output else decoded_output
             )
             logger.info(
                 "output from hg command #%s: %s",

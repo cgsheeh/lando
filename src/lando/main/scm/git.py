@@ -236,7 +236,7 @@ class GitSCM(AbstractSCM):
                 "--binary",
                 cwd=self.path,
                 rstrip=False,
-                truncate_output=True,
+                truncate_log_output=True,
             )
 
     @override
@@ -254,7 +254,7 @@ class GitSCM(AbstractSCM):
             "-1",
             revision_id,
             cwd=self.path,
-            truncate_output=True,
+            truncate_log_output=True,
         )
         # We only return the patch if the `From` header indicates that it's the same as
         # the requested revision. This may not be the case when, e.g., `git
@@ -579,7 +579,7 @@ class GitSCM(AbstractSCM):
         *args,
         cwd: str | None = None,
         rstrip: bool = True,
-        truncate_output: bool = False,
+        truncate_log_output: bool = False,
     ) -> str:
         """Run a git command and return full output.
 
@@ -591,7 +591,7 @@ class GitSCM(AbstractSCM):
         cwd: str
             Optional path to work in, default to '/'
 
-        truncate_output: bool
+        truncate_log_output: bool
             If `True`, only the head and tail of the command's output will be
             logged. Use this for commands like `git format-patch` whose full
             output is too large to be useful in logs. The return value is
@@ -639,7 +639,7 @@ class GitSCM(AbstractSCM):
             )
 
         if out:
-            log_output = truncate_text(out) if truncate_output else out
+            log_output = truncate_text(out) if truncate_log_output else out
             logger.info(
                 "output from git command #%s: %s",
                 correlation_id,
