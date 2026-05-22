@@ -10,14 +10,12 @@ from time import sleep
 from typing import Callable, TypeVar
 
 from celery import Task
-from django.db import transaction
 from kombu.exceptions import OperationalError
 
 import lando.utils.treestatus
 from lando.api.legacy.treestatus import TreeStatus
 from lando.main.models import (
     BaseJob,
-    JobStatus,
     Repo,
     WorkerType,
 )
@@ -195,8 +193,11 @@ class Worker(ABC):
     def loop(self):
         """Fetch jobs and processes them.
 
-        Jobs are found using the first entity from the `job_type.next_job()` method.
-        They are then processed through the concrete implementation's `run_job()`.
+        Jobs are claimed via the `job_type.claim_next_job()` context manager,
+        which opens a transaction, locks the row with `SELECT FOR UPDATE`,
+        transitions the job to `IN_PROGRESS`, and holds the lock until the
+        `with` block exits. This prevents concurrent workers from claiming
+        the same job.
 
         Basic error-handling and job-status management is performed for temporary,
         permanent, and unexpected exceptions not handled by the concrete implementation's
@@ -214,23 +215,26 @@ class Worker(ABC):
             # We refresh again after a throttle, in case trees were closed or re-opened.
             self.refresh_active_repos()
 
-        with transaction.atomic():
-            job = self.job_type.next_job(repositories=self.active_repos).first()
+        with self.job_type.claim_next_job(repositories=self.active_repos) as job:
+            if job is None:
+                # No job was available; do not call run_idle_maintenance inside the
+                # `with` block since it would hold an empty transaction open.
+                pass
+            else:
+                self.process_claimed_job(job)
 
         if job is None:
             self.run_idle_maintenance()
-            return
 
+    def process_claimed_job(self, job: BaseJob):
+        """Process a job that has already been claimed and locked.
+
+        Wraps job execution with the duration-tracking `processing()` context
+        manager and translates exceptions raised by `run_job()` into status
+        transitions on the job.
+        """
         with job.processing():
             logger.info(f"Starting {job}", extra={"id": job.id})
-
-            if job.status not in [JobStatus.SUBMITTED, JobStatus.DEFERRED]:
-                logger.warning(f"Unexpected status for {job}")
-
-            job.status = JobStatus.IN_PROGRESS
-            job.attempts += 1
-            # Make sure the status and attempt count are updated in the database
-            job.save()
 
             try:
                 self.last_job_finished = self.run_job(job)

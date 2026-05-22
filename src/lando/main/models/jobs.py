@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Self
 
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Case, IntegerField, QuerySet, When
 from django.utils.translation import gettext_lazy
 
@@ -45,10 +45,11 @@ class JobStatus(models.TextChoices):
         For `JobStatus.SUBMITTED` jobs, higher priority items come first
         and then we order by creation time (older first).
 
-        Any `JobStatus.IN_PROGRESS` jobs are second. As there should
-        be a maximum of one (per repository), and with the assumption of a single worker
-        instance, a worker picking up an IN_PROGRESS job would mean that the job
-        previously crashed, and that the worker needs to restart processing.
+        `JobStatus.IN_PROGRESS` jobs are ordered second for any queries that
+        include them. Note that worker queue selection no longer includes
+        `IN_PROGRESS` jobs (see `claimable`), so this ordering only matters
+        for queries that explicitly include in-progress jobs (e.g., UI
+        listings of a user's pending work).
         """
         return Case(
             When(status=cls.SUBMITTED, then=1),
@@ -66,9 +67,23 @@ class JobStatus(models.TextChoices):
     def pending(cls) -> list[Self]:
         """Group of Job statuses that may change in the future.
 
-        This includes IN_PROGRESS jobs. See doc for ordering().
+        This includes `IN_PROGRESS` jobs, which is appropriate for UI views
+        of a user's active work. For worker queue selection, use `claimable`
+        instead so that a job currently being processed by one worker is not
+        claimed by another.
         """
         return [cls.SUBMITTED, cls.IN_PROGRESS, cls.DEFERRED]
+
+    @classmethod
+    def claimable(cls) -> list[Self]:
+        """Group of Job statuses that a worker may claim from the queue.
+
+        Deliberately excludes `IN_PROGRESS` so concurrent workers do not both
+        claim the same job. A consequence is that a job left in `IN_PROGRESS`
+        by a crashed worker will not be auto-recovered, and requires manual
+        intervention to retry.
+        """
+        return [cls.SUBMITTED, cls.DEFERRED]
 
     @classmethod
     def final(cls) -> list[Self]:
@@ -242,6 +257,39 @@ class BaseJob(BaseModel):
         return query.select_for_update()
 
     @classmethod
+    @contextmanager
+    def claim_next_job(
+        cls,
+        repositories: Iterable[str] | None = None,
+        **kwargs,
+    ):
+        """Claim and lock the next available job for processing.
+
+        Opens a database transaction, locks the next available row with
+        `SELECT FOR UPDATE`, transitions the job to `IN_PROGRESS`, and yields
+        it to the caller. The transaction (and therefore the row lock) is held
+        for the entire duration of the `with` block, so no other worker can
+        select or modify the row until processing completes.
+
+        Yields `None` if no claimable job is available.
+
+        On a hard worker crash inside the `with` block, the transaction is
+        rolled back by the database, returning the job to its prior status
+        so another worker can claim it. On a clean exit (including handled
+        exceptions inside the block), any state changes made by the caller
+        are committed when the block exits.
+        """
+        with transaction.atomic():
+            job = cls.next_job(repositories=repositories, **kwargs).first()
+            if job is not None:
+                if job.status not in [JobStatus.SUBMITTED, JobStatus.DEFERRED]:
+                    logger.warning(f"Unexpected status for {job}")
+                job.status = JobStatus.IN_PROGRESS
+                job.attempts += 1
+                job.save()
+            yield job
+
+    @classmethod
     def queue_jobs(cls) -> list[dict[str, Any]]:
         """Return an ordered list of queued jobs."""
         jobs = cls.job_queue_query().all()
@@ -253,7 +301,9 @@ class BaseJob(BaseModel):
     ) -> QuerySet:
         """Return a query which selects the queued jobs.
 
-        The default implementation includes IN_PROGRESS jobs. See doc for ordering().
+        Only jobs in `JobStatus.claimable()` states are returned. Jobs in
+        `JobStatus.IN_PROGRESS` are deliberately excluded so a job already
+        being processed by one worker cannot be claimed by another.
 
         Args:
             repositories (iterable): A list of repository names to use when filtering
@@ -261,7 +311,7 @@ class BaseJob(BaseModel):
 
             **kwargs (dict): Additional arguments for descendent classes.
         """
-        q = cls.objects.filter(status__in=JobStatus.pending())
+        q = cls.objects.filter(status__in=JobStatus.claimable())
 
         if repositories:
             q = q.filter(target_repo__in=repositories)

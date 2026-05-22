@@ -169,17 +169,26 @@ def test_landing_job_acquire_job_job_queue_query(mocked_repo_config):
     ):
         assert qjob.id == job.id
 
-    # Update the last job to be in progress and mark the middle job to be
-    # cancelled so that the queue changes.
+    # Transition one job to `IN_PROGRESS` and another to `CANCELLED`. Neither
+    # should appear in the queue: `IN_PROGRESS` is excluded so a job already
+    # being processed by one worker cannot be claimed by another, and
+    # `CANCELLED` is a terminal state.
     jobs[2].status = JobStatus.IN_PROGRESS
     jobs[1].status = JobStatus.CANCELLED
 
     for job in jobs:
         job.save()
-    # The now IN_PROGRESS job should be first, and the cancelled job should
-    # not appear in the queue.
+
     queue_items = LandingJob.job_queue_query(repositories=[REPO], grace_seconds=0).all()
-    assert len(queue_items) == 2
-    assert queue_items[0].id == jobs[2].id
-    assert queue_items[1].id == jobs[0].id
-    assert jobs[1] not in queue_items
+    assert len(queue_items) == 1, (
+        "Only the remaining `SUBMITTED` job should be in the queue."
+    )
+    assert queue_items[0].id == jobs[0].id, (
+        "The remaining `SUBMITTED` job should be the only queue item."
+    )
+    assert jobs[1] not in queue_items, (
+        "`CANCELLED` jobs should not appear in the queue."
+    )
+    assert jobs[2] not in queue_items, (
+        "`IN_PROGRESS` jobs should not appear in the queue."
+    )
