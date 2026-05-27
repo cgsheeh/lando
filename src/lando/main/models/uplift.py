@@ -4,6 +4,7 @@ from urllib.parse import urljoin
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 from django.urls import reverse
 
@@ -160,6 +161,12 @@ class UpliftSubmission(BaseModel):
         related_name="uplift_submission",
     )
 
+    class Meta:
+        # GIN index for the revision-updated webhook's `__contains=[id]` lookup.
+        indexes = [
+            GinIndex(fields=["requested_revision_ids"]),
+        ]
+
 
 class RevisionUpliftJob(BaseModel):
     """Through model to map revisions to uplift jobs."""
@@ -167,6 +174,15 @@ class RevisionUpliftJob(BaseModel):
     uplift_job = models.ForeignKey("UpliftJob", on_delete=models.SET_NULL, null=True)
     revision = models.ForeignKey(Revision, on_delete=models.SET_NULL, null=True)
     index = models.IntegerField(null=True, blank=True)
+
+
+class UpliftJobMode(models.TextChoices):
+    """Whether an `UpliftJob` creates target revisions (`moz-phab uplift`)
+    or refreshes its `parent_job`'s revisions in place (`moz-phab submit`).
+    """
+
+    CREATE = "CREATE", "Create"
+    UPDATE = "UPDATE", "Update"
 
 
 class UpliftJob(BaseJob):
@@ -177,6 +193,21 @@ class UpliftJob(BaseJob):
     """
 
     type: str = "Uplift"
+
+    mode = models.CharField(
+        choices=UpliftJobMode.choices,
+        default=UpliftJobMode.CREATE,
+        max_length=8,
+    )
+
+    # Set on UPDATE jobs to the CREATE job whose targets are being refreshed.
+    parent_job = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="update_jobs",
+    )
 
     # Phabricator uplift revision IDs as an ordered list of integers.
     # Example: If D1->D2->D3 is requested for uplift to beta, which
