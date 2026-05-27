@@ -5,14 +5,21 @@ from django.db import transaction
 from ninja import NinjaAPI, Schema
 from ninja.responses import codes_4xx
 
-from lando.main.models.uplift import UpliftAssessment, UpliftRevision
+from lando.main.models.jobs import JobStatus
+from lando.main.models.uplift import (
+    UpliftAssessment,
+    UpliftJob,
+    UpliftJobMode,
+    UpliftRevision,
+    UpliftSubmission,
+)
 from lando.utils.exceptions import (
     NotFoundProblemException,
     ProblemDetail,
     ProblemException,
     problem_exception_handler,
 )
-from lando.utils.ninja_auth import PhabricatorTokenAuth
+from lando.utils.ninja_auth import HarbormasterWebhookAuth, PhabricatorTokenAuth
 from lando.utils.tasks import set_uplift_request_form_on_revision
 
 logger = logging.getLogger(__name__)
@@ -90,4 +97,103 @@ def link_revision_to_assessment(
         revision_id=body.revision_id,
         assessment_id=body.assessment_id,
         created=created,
+    )
+
+
+class HarbormasterRevisionObject(Schema):
+    """Inner `object` payload as posted by Phabricator Harbormaster."""
+
+    # Phabricator sends both `id` (int) and `phid`; `id` is authoritative.
+    id: int
+    phid: str | None = None
+
+
+class RevisionUpdatedRequest(Schema):
+    """Request body for the Harbormaster revision-updated webhook."""
+
+    object: HarbormasterRevisionObject
+
+
+class RevisionUpdatedResponse(Schema):
+    """Response body summarising the UPDATE jobs queued by a webhook call."""
+
+    revision_id: int
+    queued_jobs: list[int]
+
+
+@api.post(
+    "/webhook/revision-updated",
+    auth=HarbormasterWebhookAuth(),
+    response={202: RevisionUpdatedResponse, codes_4xx: ProblemDetail},
+)
+def revision_updated_webhook(
+    request: WSGIRequest,
+    body: RevisionUpdatedRequest,
+) -> tuple[int, dict]:
+    """Queue UPDATE-mode `UpliftJob`s when a tracked source revision is updated.
+
+    Queues one job per eligible parent CREATE job (status=LANDED, non-empty
+    `created_revision_ids`, no pending UPDATE already in flight) for every
+    `UpliftSubmission` whose `requested_revision_ids` contains `body.object.id`.
+    """
+    revision_id = body.object.id
+
+    logger.info("Harbormaster webhook fired for D%d.", revision_id)
+
+    submissions = UpliftSubmission.objects.filter(
+        requested_revision_ids__contains=[revision_id]
+    )
+
+    queued_job_ids: list[int] = []
+
+    with transaction.atomic():
+        for submission in submissions:
+            create_jobs = submission.uplift_jobs.filter(
+                mode=UpliftJobMode.CREATE,
+                status=JobStatus.LANDED,
+            )
+
+            for parent_job in create_jobs:
+                if not parent_job.has_created_revisions:
+                    logger.debug(
+                        "Skipping UpliftJob %d: no `created_revision_ids`.",
+                        parent_job.id,
+                    )
+                    continue
+
+                in_flight_update_exists = UpliftJob.objects.filter(
+                    parent_job=parent_job,
+                    status__in=JobStatus.pending(),
+                ).exists()
+                if in_flight_update_exists:
+                    logger.info(
+                        "Skipping UpliftJob %d: UPDATE already in flight.",
+                        parent_job.id,
+                    )
+                    continue
+
+                update_job = UpliftJob.objects.create(
+                    submission=submission,
+                    target_repo=parent_job.target_repo,
+                    requester_email=parent_job.requester_email,
+                    mode=UpliftJobMode.UPDATE,
+                    parent_job=parent_job,
+                    status=JobStatus.SUBMITTED,
+                )
+                parent_revisions = list(parent_job.revisions.all())
+                update_job.add_revisions(parent_revisions)
+                update_job.sort_revisions(parent_revisions)
+                queued_job_ids.append(update_job.id)
+
+                logger.info(
+                    "Queued UPDATE UpliftJob %d (parent=%d) for D%d on %s.",
+                    update_job.id,
+                    parent_job.id,
+                    revision_id,
+                    parent_job.target_repo.name,
+                )
+
+    return 202, RevisionUpdatedResponse(
+        revision_id=revision_id,
+        queued_jobs=queued_job_ids,
     )
