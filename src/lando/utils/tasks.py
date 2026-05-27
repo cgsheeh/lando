@@ -128,6 +128,8 @@ def send_uplift_failure_email(
     job_url: str,
     reason: str,
     requested_revision_ids: list[int],
+    is_update: bool = False,
+    target_revision_ids: list[int] | None = None,
 ):
     """Notify a user that an uplift job failed.
 
@@ -137,6 +139,8 @@ def send_uplift_failure_email(
         job_url: URL to view the job details.
         reason: Error message describing why the uplift failed.
         requested_revision_ids: List of Phabricator revision IDs that were being uplifted.
+        is_update: Switch to the "auto-refresh failed" wording.
+        target_revision_ids: Stale target revisions to list when `is_update`.
     """
     if not recipient_email:
         logger.info("Skipping uplift failure email because recipient email is empty")
@@ -151,6 +155,8 @@ def send_uplift_failure_email(
                     job_url,
                     reason,
                     requested_revision_ids,
+                    is_update=is_update,
+                    target_revision_ids=target_revision_ids,
                 )
             ]
         )

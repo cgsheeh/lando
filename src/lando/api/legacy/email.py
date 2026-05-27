@@ -82,6 +82,33 @@ Reason for failure:
 {{reason}}
 """.strip()
 
+UPLIFT_UPDATE_FAILURE_EMAIL_TEMPLATE = f"""
+Lando tried to automatically refresh your existing uplift revisions for
+{{repo_name}} because the source revision was updated, but the refresh
+did not complete successfully.
+
+YOUR EXISTING UPLIFT REVISIONS WERE NOT UPDATED. The following uplift
+revisions on Phabricator now lag behind the source revision and need to
+be updated out-of-band (Lando will not retry this automatically):
+
+{{target_revision_lines}}
+
+WHAT TO DO NEXT:
+
+Pull the latest {{repo_name}} branch locally, re-apply the updated
+source patch, resolve any merge conflicts, and run `moz-phab submit`
+against the target revisions above to bring them back in sync.
+
+For detailed step-by-step instructions, see {UPLIFT_DOCS_URL}
+
+TECHNICAL DETAILS:
+
+Job details: {{job_url}}
+
+Reason for failure:
+{{reason}}
+""".strip()
+
 UPLIFT_SUCCESS_EMAIL_TEMPLATE = """
 Your uplift request for {repo_name} finished successfully.
 
@@ -103,6 +130,8 @@ def make_uplift_failure_email(
     job_url: str,
     reason: str,
     requested_revision_ids: list[int],
+    is_update: bool = False,
+    target_revision_ids: list[int] | None = None,
 ) -> EmailMessage:
     """Build an uplift failure email.
 
@@ -112,7 +141,33 @@ def make_uplift_failure_email(
         job_url: URL to view the job details.
         reason: Error message describing why the uplift failed.
         requested_revision_ids: Optional list of original revision IDs that were being uplifted.
+        is_update: Switch to the "auto-refresh failed" wording.
+        target_revision_ids: Stale target revisions to list when `is_update`.
     """
+    if is_update:
+        target_revision_lines = (
+            format_revision_id_lines(target_revision_ids)
+            if target_revision_ids
+            else "(no target revisions on record)"
+        )
+        body = UPLIFT_UPDATE_FAILURE_EMAIL_TEMPLATE.format(
+            job_url=job_url,
+            reason=reason,
+            repo_name=repo_name,
+            target_revision_lines=target_revision_lines,
+        )
+
+        subject_suffix = f" (D{target_revision_ids[-1]})" if target_revision_ids else ""
+
+        msg = EmailMessage(
+            subject=(
+                f"Lando: Auto-refresh of uplift for {repo_name} failed{subject_suffix}"
+            ),
+            body=body,
+            to=[recipient_email],
+        )
+        return msg
+
     # Format revision URL (tip-most revision only)
     if requested_revision_ids:
         revision_urls = f"{settings.SITE_URL}/D{requested_revision_ids[-1]}/"

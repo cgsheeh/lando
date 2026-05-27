@@ -1382,3 +1382,66 @@ def test_uplift_worker_update_mode_runs_moz_phab_submit(
     assert update_job.created_revision_ids == [200, 201], (
         "UPDATE job should inherit its parent's created_revision_ids."
     )
+
+
+@pytest.mark.django_db
+def test_uplift_worker_update_mode_failure_dispatches_update_email(
+    repo_mc,
+    user,
+    uplift_worker,
+    create_patch_revision,
+    normal_patch,
+    monkeypatch,
+    make_uplift_job_with_revisions,
+    mock_uplift_email_tasks,
+):
+    """An UPDATE-mode failure should send the out-of-band recovery email."""
+    repo = repo_mc(SCMType.GIT, name="firefox-beta", approval_required=True)
+    revisions = [create_patch_revision(110, patch=normal_patch(0))]
+
+    parent_job = make_uplift_job_with_revisions(repo, user, revisions)
+    parent_job.status = JobStatus.LANDED
+    parent_job.created_revision_ids = [210]
+    parent_job.save()
+
+    update_job = UpliftJob.objects.create(
+        status=JobStatus.SUBMITTED,
+        requester_email=user.email,
+        target_repo=repo,
+        submission=parent_job.submission,
+        mode=UpliftJobMode.UPDATE,
+        parent_job=parent_job,
+    )
+    RevisionUpliftJob.objects.create(
+        uplift_job=update_job, revision=revisions[0], index=0
+    )
+
+    monkeypatch.setattr(
+        "lando.api.legacy.workers.uplift_worker.ensure_revisions_from_phabricator",
+        lambda *args, **kwargs: list(revisions),
+    )
+
+    # Force the apply step to raise so the worker hits the failure path.
+    def _explode_apply_patch(*args, **kwargs):
+        raise PermanentFailureException("simulated apply failure")
+
+    monkeypatch.setattr(repo.scm, "apply_patch", _explode_apply_patch)
+
+    _, mock_failure_task = mock_uplift_email_tasks
+
+    assert not uplift_worker.run_job(update_job), (
+        "UPDATE job should report failure when the apply step explodes."
+    )
+
+    mock_failure_task.apply_async.assert_called_once()
+    args = mock_failure_task.apply_async.call_args.kwargs["args"]
+    # Positional layout matches send_uplift_failure_email's signature:
+    # (recipient_email, repo_name, job_url, reason, requested_revision_ids,
+    #  is_update, target_revision_ids).
+    assert args[5] is True, (
+        "UPDATE-mode failures should set `is_update=True` in the email task args."
+    )
+    assert args[6] == [210], (
+        "UPDATE-mode failures should pass the parent's `created_revision_ids` "
+        "as the target_revision_ids for the email."
+    )

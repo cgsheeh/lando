@@ -247,14 +247,16 @@ class UpliftWorker(Worker):
     ) -> None:
         """Send an uplift failure notification email.
 
-        Args:
-            job: The uplift job that failed.
-            repo_label: Human-readable repository name.
-            job_url: URL to view job details.
-            recipient_email: Email address to send notification to.
-            reason: Error message describing the failure.
-            requested_revision_ids: List of Phabricator revision IDs that were being uplifted.
+        UPDATE-mode failures use wording that points the requester at the
+        stale target revisions to fix by hand.
         """
+        is_update = job.mode == UpliftJobMode.UPDATE
+        target_revision_ids = (
+            list(job.parent_job.created_revision_ids)
+            if is_update and job.parent_job is not None
+            else None
+        )
+
         self.call_task(
             send_uplift_failure_email,
             recipient_email,
@@ -262,6 +264,8 @@ class UpliftWorker(Worker):
             job_url,
             job.error,
             requested_revision_ids,
+            is_update,
+            target_revision_ids,
         )
 
     def create_uplift_revisions(

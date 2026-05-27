@@ -78,3 +78,53 @@ def test_make_uplift_success_email():
 
     assert email.subject == "Lando: Uplift for firefox-esr succeeded (D456)"
     assert email.body == SUCCESS_EXPECTED_BODY
+
+
+UPDATE_FAILURE_EXPECTED_BODY = f"""
+Lando tried to automatically refresh your existing uplift revisions for
+firefox-beta because the source revision was updated, but the refresh
+did not complete successfully.
+
+YOUR EXISTING UPLIFT REVISIONS WERE NOT UPDATED. The following uplift
+revisions on Phabricator now lag behind the source revision and need to
+be updated out-of-band (Lando will not retry this automatically):
+
+- D200
+- D201
+
+WHAT TO DO NEXT:
+
+Pull the latest firefox-beta branch locally, re-apply the updated
+source patch, resolve any merge conflicts, and run `moz-phab submit`
+against the target revisions above to bring them back in sync.
+
+For detailed step-by-step instructions, see {UPLIFT_DOCS_URL}
+
+TECHNICAL DETAILS:
+
+Job details: https://lando/jobs/9
+
+Reason for failure:
+patch conflict
+""".strip()
+
+
+def test_make_uplift_failure_email_update_mode():
+    """UPDATE-mode failure email should describe the out-of-band recovery path."""
+    email = make_uplift_failure_email(
+        "user@example.com",
+        "firefox-beta",
+        "https://lando/jobs/9",
+        "patch conflict",
+        [100, 101],
+        is_update=True,
+        target_revision_ids=[200, 201],
+    )
+
+    assert email.subject == (
+        "Lando: Auto-refresh of uplift for firefox-beta failed (D201)"
+    ), "UPDATE-mode failure subject should reference the target revision tip."
+    assert email.body == UPDATE_FAILURE_EXPECTED_BODY, (
+        "UPDATE-mode failure body should list the target revisions and the "
+        "out-of-band recovery steps."
+    )
