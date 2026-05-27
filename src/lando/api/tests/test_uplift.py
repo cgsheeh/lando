@@ -22,6 +22,7 @@ from lando.main.models.uplift import (
     RevisionUpliftJob,
     UpliftAssessment,
     UpliftJob,
+    UpliftJobMode,
     UpliftRevision,
     UpliftSubmission,
     YesNoChoices,
@@ -1243,4 +1244,141 @@ def test_uplift_context_for_revision_returns_original_and_uplifted_requests(
     )
     assert list(uplifted_qs) == [submission], (
         "Querying with uplifted revision ID should find the uplift request."
+    )
+
+
+def test_rewrite_commit_message_appends_target_revision_footer():
+    """A commit message with no `Differential Revision:` footer should get one appended."""
+    from lando.api.legacy.workers.uplift_worker import (
+        rewrite_commit_message_for_target,
+    )
+
+    rewritten = rewrite_commit_message_for_target("Bug 1 - fix it r=reviewer", 200)
+
+    assert "Bug 1 - fix it r=reviewer" in rewritten, (
+        "Original commit message body must be preserved."
+    )
+    assert rewritten.rstrip().endswith(
+        "Differential Revision: http://phabricator.test/D200"
+    ), "Rewritten message should end with the target revision footer."
+
+
+def test_rewrite_commit_message_replaces_existing_footer():
+    """An existing `Differential Revision:` footer should be replaced, not duplicated."""
+    from lando.api.legacy.workers.uplift_worker import (
+        rewrite_commit_message_for_target,
+    )
+
+    original = (
+        "Bug 1 - fix it r=reviewer\n"
+        "\n"
+        "Summary text.\n"
+        "\n"
+        "Differential Revision: http://phabricator.test/D100\n"
+    )
+
+    rewritten = rewrite_commit_message_for_target(original, 200)
+
+    assert rewritten.count("Differential Revision:") == 1, (
+        "Rewritten message should carry exactly one `Differential Revision:` footer."
+    )
+    assert "D100" not in rewritten, (
+        "Old `Differential Revision:` footer should be stripped."
+    )
+    assert rewritten.rstrip().endswith(
+        "Differential Revision: http://phabricator.test/D200"
+    ), "Rewritten message should end with the target revision footer."
+
+
+@pytest.mark.django_db
+def test_uplift_worker_update_mode_runs_moz_phab_submit(
+    repo_mc,
+    user,
+    uplift_worker,
+    create_patch_revision,
+    normal_patch,
+    monkeypatch,
+    make_uplift_job_with_revisions,
+    mock_uplift_email_tasks,
+):
+    """An UPDATE-mode job applies fresh diffs and refreshes targets via `moz-phab submit`."""
+    repo = repo_mc(SCMType.GIT, name="firefox-beta", approval_required=True)
+
+    revisions = [
+        create_patch_revision(100, patch=normal_patch(0)),
+        create_patch_revision(101, patch=normal_patch(1)),
+    ]
+
+    parent_job = make_uplift_job_with_revisions(repo, user, revisions)
+    parent_job.status = JobStatus.LANDED
+    parent_job.created_revision_ids = [200, 201]
+    parent_job.save()
+
+    update_job = UpliftJob.objects.create(
+        status=JobStatus.SUBMITTED,
+        requester_email=user.email,
+        target_repo=repo,
+        submission=parent_job.submission,
+        mode=UpliftJobMode.UPDATE,
+        parent_job=parent_job,
+    )
+    for index, revision in enumerate(revisions):
+        RevisionUpliftJob.objects.create(
+            uplift_job=update_job, revision=revision, index=index
+        )
+
+    # No new Phabricator data is needed for this test; stub out the fetch so
+    # the worker does not need a live PhabricatorClient.
+    monkeypatch.setattr(
+        "lando.api.legacy.workers.uplift_worker.ensure_revisions_from_phabricator",
+        lambda *args, **kwargs: list(revisions),
+    )
+
+    submit_mock = mock.MagicMock()
+    monkeypatch.setattr(uplift_worker, "run_moz_phab_submit", submit_mock)
+
+    uplift_call_count = {"count": 0}
+
+    def _fail_if_uplift_called(*args, **kwargs):
+        uplift_call_count["count"] += 1
+
+    monkeypatch.setattr(uplift_worker, "run_moz_phab_uplift", _fail_if_uplift_called)
+
+    captured_apply_calls: list[tuple] = []
+    real_apply_patch = repo.scm.apply_patch
+
+    def _spy_apply_patch(diff, commit_message, author, timestamp):
+        captured_apply_calls.append((diff, commit_message, author, timestamp))
+        return real_apply_patch(diff, commit_message, author, timestamp)
+
+    monkeypatch.setattr(repo.scm, "apply_patch", _spy_apply_patch)
+
+    assert uplift_worker.run_job(update_job), "UPDATE-mode job should succeed."
+
+    assert submit_mock.called, (
+        "`run_moz_phab_submit` should be invoked for UPDATE jobs."
+    )
+    assert uplift_call_count["count"] == 0, (
+        "`run_moz_phab_uplift` must not run for UPDATE jobs."
+    )
+
+    assert len(captured_apply_calls) == 2, (
+        "Each source revision should be applied via `apply_patch` in UPDATE mode."
+    )
+
+    first_message = captured_apply_calls[0][1]
+    second_message = captured_apply_calls[1][1]
+    assert "Differential Revision: http://phabricator.test/D200" in first_message, (
+        "First applied commit must point at the first target uplift revision."
+    )
+    assert "Differential Revision: http://phabricator.test/D201" in second_message, (
+        "Second applied commit must point at the second target uplift revision."
+    )
+
+    update_job.refresh_from_db()
+    assert update_job.status == JobStatus.LANDED, (
+        "Successful UPDATE job should transition to LANDED."
+    )
+    assert update_job.created_revision_ids == [200, 201], (
+        "UPDATE job should inherit its parent's created_revision_ids."
     )
