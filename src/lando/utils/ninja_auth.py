@@ -1,3 +1,4 @@
+import hmac
 import logging
 
 from django.conf import settings
@@ -13,6 +14,8 @@ from lando.main.auth import AccessTokenLandoOIDCAuthenticationBackend
 from lando.utils.phabricator import PHABRICATOR_API_KEY_HEADER
 
 logger = logging.getLogger(__name__)
+
+HARBORMASTER_WEBHOOK_SECRET_HEADER = "X-Lando-Webhook-Secret"
 
 
 class AccessTokenAuth(HttpBearer):
@@ -62,6 +65,27 @@ class PhabricatorTokenAuth(APIKeyHeader):
         Note: `key` is the variable name Django-Ninja expects.
         """
         if not key or not request.user.is_authenticated:
+            return None
+
+        return key
+
+
+class HarbormasterWebhookAuth(APIKeyHeader):
+    """Authenticate Harbormaster callers via the `X-Lando-Webhook-Secret` header.
+
+    An empty configured secret rejects all callers so misconfigured environments
+    do not silently accept arbitrary webhook payloads.
+    """
+
+    param_name = HARBORMASTER_WEBHOOK_SECRET_HEADER
+
+    def authenticate(self, request: WSGIRequest, key: str | None) -> str | None:
+        configured_secret = settings.HARBORMASTER_WEBHOOK_SECRET
+
+        if not configured_secret or not key:
+            return None
+
+        if not hmac.compare_digest(key, configured_secret):
             return None
 
         return key

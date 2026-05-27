@@ -266,6 +266,8 @@ PHABRICATOR_URL = os.getenv("PHABRICATOR_URL", "http://phabricator.test")
 PHABRICATOR_ADMIN_API_KEY = os.getenv("PHABRICATOR_ADMIN_API_KEY", "")
 PHABRICATOR_UNPRIVILEGED_API_KEY = os.getenv("PHABRICATOR_UNPRIVILEGED_API_KEY", "")
 
+HARBORMASTER_WEBHOOK_SECRET = os.getenv("HARBORMASTER_WEBHOOK_SECRET", "")
+
 TREEHERDER_URL = os.getenv("TREEHERDER_URL", "https://treeherder.mozilla.org")
 
 TREESTATUS_URL = os.getenv("TREESTATUS_URL", "http://treestatus.test")
