@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -114,29 +116,40 @@ def test_userinfo_not_in_prod(mock_authenticate: MagicMock, client: Client):
     assert response.status_code == 404, "__userinfo__ should not be available in prod"
 
 
+WEBHOOK_HMAC_KEY = "phabricator-generated-hmac-key"
+WEBHOOK_BODY = b'{"object": {"type": "DREV", "phid": "PHID-DREV-abc"}}'
+
+
+def sign_webhook_body(body: bytes, key: str = WEBHOOK_HMAC_KEY) -> str:
+    """Compute the hex-encoded HMAC-SHA256 signature as Phabricator would."""
+    return hmac.new(key.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    "configured_secret, provided_key, expected, description",
+    "configured_key, provided_signature, expected_match, description",
     [
-        ("correct-secret", "correct-secret", "correct-secret", "matching secret"),
-        ("correct-secret", "wrong-secret", None, "mismatched secret"),
-        ("correct-secret", None, None, "missing header"),
-        ("", "anything", None, "unconfigured secret rejects all callers"),
+        (WEBHOOK_HMAC_KEY, sign_webhook_body(WEBHOOK_BODY), True, "matching signature"),
+        (WEBHOOK_HMAC_KEY, "deadbeef", False, "mismatched signature"),
+        (WEBHOOK_HMAC_KEY, None, False, "missing header"),
+        ("", sign_webhook_body(WEBHOOK_BODY), False, "unconfigured key rejects all"),
     ],
 )
 def test_harbormaster_webhook_auth(
-    configured_secret, provided_key, expected, description
+    configured_key, provided_signature, expected_match, description
 ):
-    """`HarbormasterWebhookAuth` returns the key on a match and `None` otherwise."""
-    if configured_secret:
+    """`HarbormasterWebhookAuth` returns the signature on a match, `None` otherwise."""
+    if configured_key:
         ConfigurationVariable.set(
-            ConfigurationKey.HARBORMASTER_WEBHOOK_SECRET,
+            ConfigurationKey.PHABRICATOR_WEBHOOK_HMAC_KEY,
             VariableTypeChoices.STR,
-            configured_secret,
+            configured_key,
         )
     auth = HarbormasterWebhookAuth()
     request = MagicMock()
+    request.body = WEBHOOK_BODY
 
-    assert auth.authenticate(request, provided_key) == expected, (
+    expected = provided_signature if expected_match else None
+    assert auth.authenticate(request, provided_signature) == expected, (
         f"`HarbormasterWebhookAuth` should return {expected!r} for {description}."
     )

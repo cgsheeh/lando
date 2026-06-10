@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 
 import pytest
@@ -12,68 +14,84 @@ from lando.main.models.uplift import UpliftJob, UpliftJobMode
 from lando.main.scm import SCMType
 
 WEBHOOK_URL = "/api/uplift/webhook/revision-updated"
-WEBHOOK_SECRET = "test-harbormaster-secret"
-WEBHOOK_HEADER = {"HTTP_X_LANDO_WEBHOOK_SECRET": WEBHOOK_SECRET}
+WEBHOOK_HMAC_KEY = "test-phabricator-hmac-key"
 
 
 @pytest.fixture
 def configured_webhook_secret(db):
-    """Set the `HARBORMASTER_WEBHOOK_SECRET` configuration variable."""
+    """Set the `PHABRICATOR_WEBHOOK_HMAC_KEY` configuration variable."""
     ConfigurationVariable.set(
-        ConfigurationKey.HARBORMASTER_WEBHOOK_SECRET,
+        ConfigurationKey.PHABRICATOR_WEBHOOK_HMAC_KEY,
         VariableTypeChoices.STR,
-        WEBHOOK_SECRET,
+        WEBHOOK_HMAC_KEY,
     )
 
 
-def post_webhook(client, revision_id: int, extra_headers: dict | None = None):
-    """Helper to POST a Harbormaster-shaped payload to the webhook."""
-    headers = extra_headers if extra_headers is not None else WEBHOOK_HEADER
+def sign_body(body: str, key: str = WEBHOOK_HMAC_KEY) -> str:
+    """Compute the hex-encoded HMAC-SHA256 signature as Phabricator would."""
+    return hmac.new(
+        key.encode("utf-8"), body.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def post_webhook(
+    client,
+    revision_id: int,
+    signature: str | None = None,
+    send_signature: bool = True,
+):
+    """POST a Phabricator-shaped payload, signing the body unless told otherwise.
+
+    By default the body is signed with the valid `WEBHOOK_HMAC_KEY`. Pass an
+    explicit `signature` to forge a bad one, or `send_signature=False` to omit
+    the header entirely.
+    """
+    body = json.dumps(
+        {
+            "object": {
+                "id": revision_id,
+                "phid": f"PHID-DREV-{revision_id}",
+            },
+        }
+    )
+    headers = {}
+    if send_signature:
+        header_value = signature if signature is not None else sign_body(body)
+        headers["HTTP_X_PHABRICATOR_WEBHOOK_SIGNATURE"] = header_value
     return client.post(
         WEBHOOK_URL,
-        data=json.dumps(
-            {
-                "object": {
-                    "id": revision_id,
-                    "phid": f"PHID-DREV-{revision_id}",
-                },
-            }
-        ),
+        data=body,
         content_type="application/json",
         **headers,
     )
 
 
 @pytest.mark.parametrize(
-    "extra_headers, description",
+    "post_kwargs, description",
     [
-        ({}, "missing"),
-        ({"HTTP_X_LANDO_WEBHOOK_SECRET": "wrong-secret"}, "invalid"),
+        ({"send_signature": False}, "missing"),
+        ({"signature": "deadbeef"}, "invalid"),
     ],
 )
 @pytest.mark.django_db
 def test_webhook_unauthorized(
-    client, configured_webhook_secret, extra_headers, description
+    client, configured_webhook_secret, post_kwargs, description
 ):
-    """Requests missing or carrying the wrong shared secret should return 401."""
-    response = post_webhook(client, revision_id=1, extra_headers=extra_headers)
+    """Requests with a missing or invalid HMAC signature should return 401."""
+    response = post_webhook(client, revision_id=1, **post_kwargs)
 
     assert response.status_code == 401, (
-        f"{description} webhook secret should return 401."
+        f"{description} webhook signature should return 401."
     )
 
 
 @pytest.mark.django_db
 def test_webhook_unset_secret_rejects_caller(client):
-    """An unset server-side secret should reject all callers."""
-    response = post_webhook(
-        client,
-        revision_id=1,
-        extra_headers={"HTTP_X_LANDO_WEBHOOK_SECRET": "anything"},
-    )
+    """An unset server-side HMAC key should reject all callers."""
+    response = post_webhook(client, revision_id=1, signature="anything")
 
     assert response.status_code == 401, (
-        "Unset HARBORMASTER_WEBHOOK_SECRET should reject all callers."
+        "Unset PHABRICATOR_WEBHOOK_HMAC_KEY should reject all callers."
     )
 
 

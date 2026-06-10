@@ -1,3 +1,4 @@
+import hashlib
 import hmac
 import logging
 
@@ -16,7 +17,7 @@ from lando.utils.phabricator import PHABRICATOR_API_KEY_HEADER
 
 logger = logging.getLogger(__name__)
 
-HARBORMASTER_WEBHOOK_SECRET_HEADER = "X-Lando-Webhook-Secret"
+PHABRICATOR_WEBHOOK_SIGNATURE_HEADER = "X-Phabricator-Webhook-Signature"
 
 
 class AccessTokenAuth(HttpBearer):
@@ -72,25 +73,34 @@ class PhabricatorTokenAuth(APIKeyHeader):
 
 
 class HarbormasterWebhookAuth(APIKeyHeader):
-    """Authenticate Harbormaster callers via the `X-Lando-Webhook-Secret` header.
+    """Authenticate Phabricator webhook callers by verifying the HMAC signature.
 
-    The secret is read from the `HARBORMASTER_WEBHOOK_SECRET` configuration
-    variable so it can be set at runtime without a new deployment secret. An
-    empty configured secret rejects all callers so misconfigured environments
-    do not silently accept arbitrary webhook payloads.
+    Phabricator signs each webhook with the webhook's HMAC key and sends the
+    hex-encoded HMAC-SHA256 digest of the raw request body in the
+    `X-Phabricator-Webhook-Signature` header. We recompute that digest using the
+    key stored in the `PHABRICATOR_WEBHOOK_HMAC_KEY` configuration variable (set
+    at runtime, no deployment secret needed) and compare. An empty configured
+    key rejects all callers so misconfigured environments do not silently accept
+    arbitrary webhook payloads.
     """
 
-    param_name = HARBORMASTER_WEBHOOK_SECRET_HEADER
+    param_name = PHABRICATOR_WEBHOOK_SIGNATURE_HEADER
 
     def authenticate(self, request: WSGIRequest, key: str | None) -> str | None:
-        configured_secret = ConfigurationVariable.get(
-            ConfigurationKey.HARBORMASTER_WEBHOOK_SECRET, ""
+        configured_key = ConfigurationVariable.get(
+            ConfigurationKey.PHABRICATOR_WEBHOOK_HMAC_KEY, ""
         )
 
-        if not configured_secret or not key:
+        if not configured_key or not key:
             return None
 
-        if not hmac.compare_digest(key, configured_secret):
+        expected_signature = hmac.new(
+            configured_key.encode("utf-8"),
+            request.body,
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(key, expected_signature):
             return None
 
         return key
