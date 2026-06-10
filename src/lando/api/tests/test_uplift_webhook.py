@@ -34,6 +34,17 @@ def sign_body(body: str, key: str = WEBHOOK_HMAC_KEY) -> str:
     ).hexdigest()
 
 
+def post_signed_payload(client, payload: dict):
+    """POST an arbitrary payload to the webhook with a valid HMAC signature."""
+    body = json.dumps(payload)
+    return client.post(
+        WEBHOOK_URL,
+        data=body,
+        content_type="application/json",
+        HTTP_X_PHABRICATOR_WEBHOOK_SIGNATURE=sign_body(body),
+    )
+
+
 def post_webhook(
     client,
     revision_id: int,
@@ -288,3 +299,61 @@ def test_webhook_queues_one_update_per_target_repo(
     assert queued_parents == {beta_parent.id, release_parent.id}, (
         "Each LANDED parent should have exactly one UPDATE child queued."
     )
+
+
+@pytest.mark.django_db
+def test_webhook_resolves_phid_to_revision_id(
+    client,
+    configured_webhook_secret,
+    repo_mc,
+    user,
+    create_patch_revision,
+    normal_patch,
+    make_uplift_job_with_revisions,
+    monkeypatch,
+):
+    """A Phabricator-shaped payload (PHID only, no `id`) resolves and queues a job."""
+    repo = repo_mc(SCMType.GIT, name="firefox-beta", approval_required=True)
+    revisions = [create_patch_revision(120, patch=normal_patch(0))]
+    parent_job = make_uplift_job_with_revisions(repo, user, revisions)
+    parent_job.status = JobStatus.LANDED
+    parent_job.created_revision_ids = [220]
+    parent_job.save()
+
+    # The webhook resolves the PHID to a revision ID via Conduit; stub it.
+    monkeypatch.setattr(
+        "lando.api.uplift_api.resolve_revision_phid_to_id",
+        lambda phid: 120,
+    )
+
+    response = post_signed_payload(
+        client, {"object": {"type": "DREV", "phid": "PHID-DREV-xyz"}}
+    )
+
+    assert response.status_code == 202, "Webhook should return 202."
+    body = response.json()
+    assert body["revision_id"] == 120, "Response should echo the resolved revision ID."
+    assert len(body["queued_jobs"]) == 1, (
+        "A resolved PHID matching a LANDED parent should queue one UPDATE job."
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "payload, description",
+    [
+        ({"object": {"type": "TEST", "phid": None}}, "test ping with no PHID"),
+        ({"object": {}}, "object with neither id nor phid"),
+        ({}, "missing object entirely"),
+    ],
+)
+def test_webhook_unresolvable_payload_is_noop(
+    client, configured_webhook_secret, payload, description
+):
+    """Payloads with no resolvable revision should be a no-op 202, not a 422."""
+    response = post_signed_payload(client, payload)
+
+    assert response.status_code == 202, f"{description} should return 202."
+    body = response.json()
+    assert body["revision_id"] is None, f"{description} should have no revision ID."
+    assert body["queued_jobs"] == [], f"{description} should queue no jobs."
