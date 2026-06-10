@@ -1,8 +1,12 @@
 import json
 
 import pytest
-from django.test import override_settings
 
+from lando.main.models.configuration import (
+    ConfigurationKey,
+    ConfigurationVariable,
+    VariableTypeChoices,
+)
 from lando.main.models.jobs import JobStatus
 from lando.main.models.uplift import UpliftJob, UpliftJobMode
 from lando.main.scm import SCMType
@@ -10,6 +14,16 @@ from lando.main.scm import SCMType
 WEBHOOK_URL = "/api/uplift/webhook/revision-updated"
 WEBHOOK_SECRET = "test-harbormaster-secret"
 WEBHOOK_HEADER = {"HTTP_X_LANDO_WEBHOOK_SECRET": WEBHOOK_SECRET}
+
+
+@pytest.fixture
+def configured_webhook_secret(db):
+    """Set the `HARBORMASTER_WEBHOOK_SECRET` configuration variable."""
+    ConfigurationVariable.set(
+        ConfigurationKey.HARBORMASTER_WEBHOOK_SECRET,
+        VariableTypeChoices.STR,
+        WEBHOOK_SECRET,
+    )
 
 
 def post_webhook(client, revision_id: int, extra_headers: dict | None = None):
@@ -38,8 +52,9 @@ def post_webhook(client, revision_id: int, extra_headers: dict | None = None):
     ],
 )
 @pytest.mark.django_db
-@override_settings(HARBORMASTER_WEBHOOK_SECRET=WEBHOOK_SECRET)
-def test_webhook_unauthorized(client, extra_headers, description):
+def test_webhook_unauthorized(
+    client, configured_webhook_secret, extra_headers, description
+):
     """Requests missing or carrying the wrong shared secret should return 401."""
     response = post_webhook(client, revision_id=1, extra_headers=extra_headers)
 
@@ -49,7 +64,6 @@ def test_webhook_unauthorized(client, extra_headers, description):
 
 
 @pytest.mark.django_db
-@override_settings(HARBORMASTER_WEBHOOK_SECRET="")
 def test_webhook_unset_secret_rejects_caller(client):
     """An unset server-side secret should reject all callers."""
     response = post_webhook(
@@ -64,8 +78,9 @@ def test_webhook_unset_secret_rejects_caller(client):
 
 
 @pytest.mark.django_db
-@override_settings(HARBORMASTER_WEBHOOK_SECRET=WEBHOOK_SECRET)
-def test_webhook_no_matching_submission_returns_202_with_empty_jobs(client):
+def test_webhook_no_matching_submission_returns_202_with_empty_jobs(
+    client, configured_webhook_secret
+):
     """A webhook for a revision Lando has never seen should be a no-op 202."""
     response = post_webhook(client, revision_id=99999)
 
@@ -80,9 +95,9 @@ def test_webhook_no_matching_submission_returns_202_with_empty_jobs(client):
 
 
 @pytest.mark.django_db
-@override_settings(HARBORMASTER_WEBHOOK_SECRET=WEBHOOK_SECRET)
 def test_webhook_queues_update_for_landed_parent(
     client,
+    configured_webhook_secret,
     repo_mc,
     user,
     create_patch_revision,
@@ -125,9 +140,9 @@ def test_webhook_queues_update_for_landed_parent(
 
 
 @pytest.mark.django_db
-@override_settings(HARBORMASTER_WEBHOOK_SECRET=WEBHOOK_SECRET)
 def test_webhook_skips_parents_without_created_revisions(
     client,
+    configured_webhook_secret,
     repo_mc,
     user,
     create_patch_revision,
@@ -152,9 +167,9 @@ def test_webhook_skips_parents_without_created_revisions(
 
 
 @pytest.mark.django_db
-@override_settings(HARBORMASTER_WEBHOOK_SECRET=WEBHOOK_SECRET)
 def test_webhook_skips_failed_parents(
     client,
+    configured_webhook_secret,
     repo_mc,
     user,
     create_patch_revision,
@@ -179,9 +194,9 @@ def test_webhook_skips_failed_parents(
 
 
 @pytest.mark.django_db
-@override_settings(HARBORMASTER_WEBHOOK_SECRET=WEBHOOK_SECRET)
 def test_webhook_debounces_inflight_updates(
     client,
+    configured_webhook_secret,
     repo_mc,
     user,
     create_patch_revision,
@@ -213,9 +228,9 @@ def test_webhook_debounces_inflight_updates(
 
 
 @pytest.mark.django_db
-@override_settings(HARBORMASTER_WEBHOOK_SECRET=WEBHOOK_SECRET)
 def test_webhook_queues_one_update_per_target_repo(
     client,
+    configured_webhook_secret,
     repo_mc,
     user,
     create_patch_revision,

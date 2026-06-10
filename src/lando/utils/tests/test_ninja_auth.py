@@ -5,6 +5,11 @@ from django.contrib.auth.models import User
 from django.test import Client, override_settings
 
 from lando.environments import Environment
+from lando.main.models.configuration import (
+    ConfigurationKey,
+    ConfigurationVariable,
+    VariableTypeChoices,
+)
 from lando.utils.ninja_auth import HarbormasterWebhookAuth
 
 
@@ -109,6 +114,7 @@ def test_userinfo_not_in_prod(mock_authenticate: MagicMock, client: Client):
     assert response.status_code == 404, "__userinfo__ should not be available in prod"
 
 
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "configured_secret, provided_key, expected, description",
     [
@@ -119,10 +125,15 @@ def test_userinfo_not_in_prod(mock_authenticate: MagicMock, client: Client):
     ],
 )
 def test_harbormaster_webhook_auth(
-    settings, configured_secret, provided_key, expected, description
+    configured_secret, provided_key, expected, description
 ):
     """`HarbormasterWebhookAuth` returns the key on a match and `None` otherwise."""
-    settings.HARBORMASTER_WEBHOOK_SECRET = configured_secret
+    if configured_secret:
+        ConfigurationVariable.set(
+            ConfigurationKey.HARBORMASTER_WEBHOOK_SECRET,
+            VariableTypeChoices.STR,
+            configured_secret,
+        )
     auth = HarbormasterWebhookAuth()
     request = MagicMock()
 

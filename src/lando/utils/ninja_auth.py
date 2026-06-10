@@ -11,6 +11,7 @@ from ninja.security import APIKeyHeader, HttpBearer
 from typing_extensions import override
 
 from lando.main.auth import AccessTokenLandoOIDCAuthenticationBackend
+from lando.main.models.configuration import ConfigurationKey, ConfigurationVariable
 from lando.utils.phabricator import PHABRICATOR_API_KEY_HEADER
 
 logger = logging.getLogger(__name__)
@@ -73,14 +74,18 @@ class PhabricatorTokenAuth(APIKeyHeader):
 class HarbormasterWebhookAuth(APIKeyHeader):
     """Authenticate Harbormaster callers via the `X-Lando-Webhook-Secret` header.
 
-    An empty configured secret rejects all callers so misconfigured environments
+    The secret is read from the `HARBORMASTER_WEBHOOK_SECRET` configuration
+    variable so it can be set at runtime without a new deployment secret. An
+    empty configured secret rejects all callers so misconfigured environments
     do not silently accept arbitrary webhook payloads.
     """
 
     param_name = HARBORMASTER_WEBHOOK_SECRET_HEADER
 
     def authenticate(self, request: WSGIRequest, key: str | None) -> str | None:
-        configured_secret = settings.HARBORMASTER_WEBHOOK_SECRET
+        configured_secret = ConfigurationVariable.get(
+            ConfigurationKey.HARBORMASTER_WEBHOOK_SECRET, ""
+        )
 
         if not configured_secret or not key:
             return None
