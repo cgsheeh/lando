@@ -158,7 +158,9 @@ def resolve_revision_phid_to_id(phid: str) -> int | None:
     return revisions[0]["id"]
 
 
-def resolve_revision_id(revision_object: HarbormasterRevisionObject | None) -> int | None:
+def resolve_revision_id(
+    revision_object: HarbormasterRevisionObject | None,
+) -> int | None:
     """Return the Phabricator revision ID from the webhook `object` payload."""
     if revision_object is None:
         return None
