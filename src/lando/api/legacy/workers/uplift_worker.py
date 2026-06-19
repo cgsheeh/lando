@@ -18,7 +18,9 @@ from lando.main.models import (
     TemporaryFailureException,
     WorkerType,
 )
+from lando.main.models.repo import Repo
 from lando.main.models.uplift import UpliftJob, UpliftJobMode, UpliftRevision
+from lando.main.scm.abstract_scm import AbstractSCM
 from lando.utils.phabricator import PhabricatorClient
 from lando.utils.tasks import (
     send_uplift_failure_email,
@@ -102,77 +104,56 @@ class UpliftWorker(Worker):
         return True
 
     def apply_and_uplift(self, job: UpliftJob) -> list[int]:
-        """Apply uplift patches and create or refresh target revisions.
+        """Apply uplift patches to the target train, then publish per `job.mode`.
 
-        Returns target revision IDs: newly-created revisions for CREATE jobs,
-        the parent's `created_revision_ids` (refreshed in place) for UPDATE.
+        The apply phase is shared by all modes; only the publish phase, which is
+        dispatched on `job.mode`, decides what happens to the applied patches.
+        This split lets new modes (e.g. a future `CHECK`) reuse the apply phase
+        and supply their own publish behaviour. Returns target revision IDs:
+        newly-created revisions for CREATE jobs, the parent's
+        `created_revision_ids` (refreshed in place) for UPDATE.
         """
         repo = job.target_repo
-        submission = job.submission
-        user = submission.requested_by
         scm = repo.scm
-        is_update = job.mode == UpliftJobMode.UPDATE
-        parent_job = job.parent_job if is_update else None
-        target_revision_ids = list(parent_job.created_revision_ids) if is_update else []
 
-        # Refresh source diffs in place so UPDATE jobs apply the latest content.
-        if is_update:
-            phab = PhabricatorClient(
-                settings.PHABRICATOR_URL,
-                user.profile.phabricator_api_key,
-            )
-            ensure_revisions_from_phabricator(phab, submission.requested_revision_ids)
+        self.refresh_source_revisions(job)
 
         # Update to the latest commit in the target train.
         base_revision = self.update_repo(repo, job, scm, target_cset=None)
 
+        self.apply_revisions(job, repo, scm)
+
+        return self.publish_results(job, base_revision)
+
+    def refresh_source_revisions(self, job: UpliftJob) -> None:
+        """Refresh source diffs in place so UPDATE jobs apply the latest content."""
+        if job.mode != UpliftJobMode.UPDATE:
+            return
+
+        submission = job.submission
+        user = submission.requested_by
+        phab = PhabricatorClient(
+            settings.PHABRICATOR_URL,
+            user.profile.phabricator_api_key,
+        )
+        ensure_revisions_from_phabricator(phab, submission.requested_revision_ids)
+
+    def apply_revisions(self, job: UpliftJob, repo: Repo, scm: AbstractSCM) -> None:
+        """Apply each source revision's patch to the target train working copy."""
+        is_update = job.mode == UpliftJobMode.UPDATE
+        # Only UPDATE jobs target existing revisions; their footers are rewritten
+        # to point `moz-phab submit` at the parent's created revisions.
+        target_revision_ids = (
+            list(job.parent_job.created_revision_ids) if is_update else []
+        )
+
         for index, uplift_revision in enumerate(job.revisions.all()):
             # Default-arg captures this iteration's `index` for the closure.
             def apply_uplift_revision(revision: Revision, idx: int = index):
-                """Cherry-pick (CREATE) or apply the patch with a rewritten footer (UPDATE)."""
-                commit_message = revision.commit_message
-
                 if is_update:
-                    # Footer steers `moz-phab submit` at the existing target.
-                    target_id = target_revision_ids[idx]
-                    commit_message = rewrite_commit_message_for_target(
-                        commit_message, target_id
-                    )
-                    # Skip cherry-pick: the autoland commit may predate the
-                    # developer's latest edits.
-                    scm.apply_patch(
-                        revision.diff,
-                        commit_message,
-                        revision.author,
-                        revision.timestamp,
-                    )
-                    return
-
-                commit_id = revision.get_latest_landing_commit_id()
-                if commit_id and scm.commit_exists(commit_id):
-                    logger.debug(
-                        f"Cherry-picking {revision} with commit_id: {commit_id}"
-                    )
-                    try:
-                        scm.cherry_pick_commit(commit_id)
-                        return
-                    except NotImplementedError:
-                        logger.debug(
-                            "Cherry-pick not supported for this SCM type. "
-                            "Falling back to applying patch."
-                        )
+                    self.apply_update_patch(revision, scm, target_revision_ids[idx])
                 else:
-                    logger.debug(
-                        f"No landing commit found for {revision}. "
-                        f"Falling back to applying patch."
-                    )
-
-                scm.apply_patch(
-                    revision.diff,
-                    commit_message,
-                    revision.author,
-                    revision.timestamp,
-                )
+                    self.apply_create_patch(revision, scm)
 
             self.handle_new_commit_failures(
                 apply_uplift_revision, repo, job, scm, uplift_revision
@@ -180,16 +161,76 @@ class UpliftWorker(Worker):
             new_commit = scm.describe_commit()
             logger.debug(f"Created new commit {new_commit}")
 
-        if is_update:
-            # `moz-phab submit` updated the targets in place; mirror the
-            # parent's `created_revision_ids` for email/UI parity.
-            self.submit_uplift_updates(
-                job, user.profile.phabricator_api_key, base_revision
+    def apply_update_patch(
+        self, revision: Revision, scm: AbstractSCM, target_revision_id: int
+    ) -> None:
+        """Apply a patch with a footer rewritten to target an existing revision.
+
+        Skips cherry-pick because the autoland commit may predate the
+        developer's latest edits; the rewritten `Differential Revision:` footer
+        steers `moz-phab submit` at the existing target.
+        """
+        commit_message = rewrite_commit_message_for_target(
+            revision.commit_message, target_revision_id
+        )
+        scm.apply_patch(
+            revision.diff,
+            commit_message,
+            revision.author,
+            revision.timestamp,
+        )
+
+    def apply_create_patch(self, revision: Revision, scm: AbstractSCM) -> None:
+        """Cherry-pick the landing commit when available, else apply the patch."""
+        commit_id = revision.get_latest_landing_commit_id()
+        if commit_id and scm.commit_exists(commit_id):
+            logger.debug(f"Cherry-picking {revision} with commit_id: {commit_id}")
+            try:
+                scm.cherry_pick_commit(commit_id)
+                return
+            except NotImplementedError:
+                logger.debug(
+                    "Cherry-pick not supported for this SCM type. "
+                    "Falling back to applying patch."
+                )
+        else:
+            logger.debug(
+                f"No landing commit found for {revision}. "
+                f"Falling back to applying patch."
             )
-            job.created_revision_ids = target_revision_ids
-            job.status = JobStatus.LANDED
-            job.save()
-            return target_revision_ids
+
+        scm.apply_patch(
+            revision.diff,
+            revision.commit_message,
+            revision.author,
+            revision.timestamp,
+        )
+
+    def publish_results(self, job: UpliftJob, base_revision: str) -> list[int]:
+        """Publish the applied patches according to the job's mode."""
+        if job.mode == UpliftJobMode.UPDATE:
+            return self.publish_update(job, base_revision)
+
+        return self.publish_create(job, base_revision)
+
+    def publish_update(self, job: UpliftJob, base_revision: str) -> list[int]:
+        """Refresh existing target revisions in place via `moz-phab submit`."""
+        user = job.submission.requested_by
+        target_revision_ids = list(job.parent_job.created_revision_ids)
+
+        self.submit_uplift_updates(job, user.profile.phabricator_api_key, base_revision)
+
+        # `moz-phab submit` updated the targets in place; mirror the parent's
+        # `created_revision_ids` for email/UI parity.
+        job.created_revision_ids = target_revision_ids
+        job.status = JobStatus.LANDED
+        job.save()
+        return target_revision_ids
+
+    def publish_create(self, job: UpliftJob, base_revision: str) -> list[int]:
+        """Create new Phabricator uplift revisions via `moz-phab uplift`."""
+        submission = job.submission
+        user = submission.requested_by
 
         result = self.create_uplift_revisions(
             job, user.profile.phabricator_api_key, base_revision
